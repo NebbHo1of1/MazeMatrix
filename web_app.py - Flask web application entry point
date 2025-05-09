@@ -1,0 +1,219 @@
+#!/usr/bin/env python3
+"""
+MazeMatrix - Algorithms in Action
+Web-based maze generation and pathfinding visualization application.
+This file creates a Flask server to serve a web-based visualization.
+"""
+
+import os
+import sys
+import time
+import json
+import threading
+from flask import Flask, render_template, request, jsonify
+from maze_generator import create_maze
+from pathfinding import run_algorithm
+
+# Create Flask app
+app = Flask(__name__)
+
+# Global variables to store maze state
+maze_data = {
+    "maze": None,
+    "start": None,
+    "end": None,
+    "graph": None,
+    "height": 15,
+    "width": 15,
+    "running": False,
+    "current_algorithm": "DFS",
+    "results": {}
+}
+
+# Define colors - These will be used by both light and dark modes as defined in CSS
+COLORS = {
+    "wall": "var(--wall-color)",             # Using CSS variable for wall color
+    "path": "var(--path-color)",             # Using CSS variable for path color
+    "start": "var(--start-color)",           # Using CSS variable for start color
+    "end": "var(--end-color)",               # Using CSS variable for end color
+    "visited": {
+        "DFS": "#3498DB",                    # Blue
+        "Dijkstra": "#9B59B6",               # Purple
+        "A*": "#F39C12",                     # Orange
+        "Custom A*": "#1ABC9C"               # Turquoise
+    },
+    "final_path": {
+        "DFS": "#FF5733",                    # Bright red-orange
+        "Dijkstra": "#FFC300",               # Bright yellow
+        "A*": "#C70039",                     # Crimson
+        "Custom A*": "#900C3F"               # Dark pink
+    },
+    "path_color_rgb": {                      # RGB values for path glow effects
+        "DFS": "255, 87, 51",                # RGB for #FF5733
+        "Dijkstra": "255, 195, 0",           # RGB for #FFC300
+        "A*": "199, 0, 57",                  # RGB for #C70039
+        "Custom A*": "144, 12, 63"           # RGB for #900C3F
+    },
+    "background": "var(--background)"        # Using CSS variable for background
+}
+
+@app.route('/')
+def index():
+    """Serve the main page."""
+    return render_template('index.html', colors=json.dumps(COLORS))
+
+@app.route('/generate_maze', methods=['POST'])
+def generate_maze_route():
+    """Generate a new maze with the specified dimensions."""
+    try:
+        # Get dimensions from request
+        data = request.get_json()
+        height = int(data.get('height', 15))
+        width = int(data.get('width', 15))
+        
+        # Validate dimensions
+        if height < 5 or width < 5 or height > 50 or width > 50:
+            return jsonify({
+                'success': False,
+                'error': 'Maze dimensions must be between 5x5 and 50x50'
+            })
+        
+        # Update stored dimensions
+        maze_data['height'] = height
+        maze_data['width'] = width
+        
+        # Generate maze
+        maze, start, end, graph = create_maze(height, width)
+        
+        # Store maze data
+        maze_data['maze'] = maze
+        maze_data['start'] = start
+        maze_data['end'] = end
+        maze_data['graph'] = graph
+        maze_data['results'] = {}
+        
+        # Convert maze to JSON-serializable format
+        maze_json = []
+        for y in range(len(maze)):
+            row = []
+            for x in range(len(maze[0])):
+                cell_type = 'wall' if maze[y][x] == 1 else 'path'
+                if (y, x) == start:
+                    cell_type = 'start'
+                elif (y, x) == end:
+                    cell_type = 'end'
+                row.append(cell_type)
+            maze_json.append(row)
+        
+        return jsonify({
+            'success': True,
+            'maze': maze_json,
+            'start': start,
+            'end': end
+        })
+    
+    except Exception as e:
+        print(f"Error generating maze: {str(e)}")
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        })
+
+@app.route('/run_algorithm', methods=['POST'])
+def run_algorithm_route():
+    """Run the specified algorithms on the current maze."""
+    try:
+        # Get algorithms from request
+        data = request.get_json()
+        algorithms = data.get('algorithms', ['DFS'])
+        
+        # Make sure algorithms is a list
+        if not isinstance(algorithms, list):
+            algorithms = [algorithms]
+        
+        # Check if maze exists
+        if not maze_data['maze'] or not maze_data['graph']:
+            return jsonify({
+                'success': False,
+                'error': 'Please generate a maze first'
+            })
+        
+        # Check if algorithm is already running
+        if maze_data['running']:
+            return jsonify({
+                'success': False,
+                'error': 'Algorithms are already running'
+            })
+        
+        # Mark as running
+        maze_data['running'] = True
+        
+        # Results for all algorithms
+        all_results = {}
+        
+        # Run each algorithm on the SAME maze
+        for algorithm in algorithms:
+            # Run algorithm
+            print(f"Running algorithm: {algorithm}")
+            result = run_algorithm(algorithm, maze_data['graph'], maze_data['start'], maze_data['end'])
+            
+            # Store result
+            maze_data['results'][algorithm] = result
+            
+            # Convert result to JSON-serializable format
+            visited_list = []
+            path_list = []
+            
+            for node in result['visited']:
+                if node != maze_data['start'] and node != maze_data['end']:
+                    visited_list.append(node)
+            
+            if result['path']:
+                for node in result['path']:
+                    if node != maze_data['start'] and node != maze_data['end']:
+                        path_list.append(node)
+            
+            stats = {
+                'time_taken': result['time_taken'] * 1000,  # Convert to ms
+                'path_length': result['path_length'],
+                'nodes_explored': result['nodes_explored']
+            }
+            
+            # Add to results
+            all_results[algorithm] = {
+                'visited': visited_list,
+                'path': path_list,
+                'stats': stats
+            }
+        
+        # Mark as not running
+        maze_data['running'] = False
+        
+        return jsonify({
+            'success': True,
+            'results': all_results
+        })
+    
+    except Exception as e:
+        print(f"Error running algorithms: {str(e)}")
+        maze_data['running'] = False
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        })
+
+@app.route('/get_algorithms', methods=['GET'])
+def get_algorithms():
+    """Get the list of available algorithms."""
+    return jsonify({
+        'success': True,
+        'algorithms': ['DFS', 'Dijkstra', 'A*', 'Custom A*']
+    })
+
+if __name__ == '__main__':
+    # Create templates directory if it doesn't exist
+    if not os.path.exists('templates'):
+        os.makedirs('templates')
+    
+    # Run the app
+    app.run(host='0.0.0.0', port=5000)
